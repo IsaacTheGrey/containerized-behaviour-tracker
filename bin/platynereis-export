@@ -1,0 +1,242 @@
+#!/usr/bin/python
+import os
+import argparse
+import glob
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+HOME_DIR = os.path.expanduser('~/')
+DATA_BASE_DIR = os.path.join(HOME_DIR, 'data')
+
+
+def pars_csv_files(csv_file_paths):
+    csv_files = {}
+    for path in csv_file_paths:
+        base = os.path.basename(path)
+
+        well = ''
+        for b in base:
+            try:
+                int(b)
+                well = well + b
+            except:
+                # break as soon as we get an int
+                break
+        assert len(well) > 0, '.csv has to start with int reflecting the weld NR: %s' % path
+        csv_files[base] = {}
+        csv_files[base]['path'] = path
+        csv_files[base]['well'] = int(well)
+    return csv_files
+
+
+def dist_of_cols(df,col1,col2):
+    # sqrt( (x-x1)**2 + (y-y1)**2)
+    xx = df[col1]- df[col1].shift(1)
+    xx = xx**2
+    yy = df[col2]- df[col2].shift(1)
+    yy = yy**2
+    pre_root = xx + yy
+    return pre_root.apply(np.sqrt)
+
+
+class Plotter(object):
+    def __init__(self, csv_fn, plots_folder):
+        self.plots_folder = plots_folder
+        self.csv_fn = csv_fn
+
+
+    def _save_plot(self, plot, description):
+        plot_filename = os.path.join(self.plots_folder, '%s-%s.png' %(self.csv_fn, description))
+        plot.savefig(plot_filename, dpi=300)
+        plot.close()
+
+
+    def plot_xy_hist(self, df, x_var,y_var):
+        plt.hist2d(df[x_var].notnull().values, df[y_var].notnull().values)
+        plt.axes().set_aspect('equal', 'datalim')
+        self._save_plot(plt, '2D_hist-%s_%s' %(x_var,y_var))
+
+
+    def plot_1D_hist(self, df, col, range=(0,1), bins=100, normed=False):
+        n, bins, patches = plt.hist(df[col], np.linspace(range[0], range[1], bins), histtype='step', stacked=True, fill=False, normed=normed)
+        plt.xlim(range)
+        self._save_plot(plt,'1D_hist-%s' %(col))
+
+
+    def plot_ts(self,df, col):
+        # plt.plot(df['frame_timestamp']/60,df[col])
+        # plt.xlabel('minutes')
+        # plt.ylabel('px')
+        # self._save_plot(plt,'ts-%s' %(col))
+        plt.bar(df['frame_timestamp']/60,df[col], color='k')
+        plt.xlabel('minutes')
+        plt.ylabel('px')
+        self._save_plot(plt,'ts-%s_b' %(col))
+
+
+def normalize_col(df, col):
+    df['%s_norm' %col] = (df[col] - df[col].min()) / (df[col].max() - df[col].min())
+    return df
+
+
+if __name__ == '__main__':
+# if __name__ == 1:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('analysisfolder', default='', nargs='?', type=str,
+                         help='path to the folder containing the .csv files from tracking')
+
+    parser.add_argument('--framerate',  type=int, help='framerate of analysed movie')
+    parser.add_argument('--downsample',  type=int, help='resulution in secs, eg: 60 for one datapoint pers minute..., depends on framerate')
+    parser.add_argument('--downsample-methode',  type=str, help='mean, median, sum, max, min')
+    parser.add_argument('--dist-threshold',  type=float, help='threshold to assume movement e.g. 4.2')
+    parser.add_argument('--rolling-mean',  type=int, help='1 - x frames')
+    parser.add_argument('--plots',  type=int, default=0, help='1 plot all, 2 plot none')
+    #parser.add_argument('--rolling-mean-smoothing',  type=int, help='1 - x frames')
+    args = parser.parse_args()
+
+    settings_string = 'fr_%s-ds_%s-dsm_%s-dth_%s-rm_%s' %(args.framerate, args.downsample, args.downsample_methode, args.dist_threshold, args.rolling_mean)
+
+
+    if not os.path.isdir(args.analysisfolder):
+        print '[ERROR] the provided directory does not exist: ', args.analysisfolder
+        exit()
+
+    csv_paths = glob.glob(args.analysisfolder+'/*.csv')
+    csv_files = pars_csv_files(csv_paths)
+    plots_folder = os.path.join(args.analysisfolder, 'plots', settings_string)
+
+    if not os.path.exists(plots_folder):
+        os.makedirs(plots_folder)
+
+
+    index_cols = ['frame_number', 'frame_timestamp']
+    remove_clos = ['Unnamed: 0', 'contour_id', 'type', 'frame_count', 'tracked_object_id', 'tracked_object_x', 'tracked_object_y']
+
+
+    for k in csv_files:
+        print '[INFO] loading ', k
+        csv_attr = csv_files[k]
+
+        df = pd.read_csv(csv_attr['path'])
+
+        if not len(df):
+            print '[INFO] skipping csv %s (no data)' % k
+            continue
+
+        # test if we have missing frames
+        if (df.frame_number - df.frame_number.shift(1)).max() > 1:
+            print '[WARNING] we have missing values! (df.frame_number)'
+
+        # test if we are missing datapoints
+        # Fixit: we have no strategy to deal with missing tracking data
+        max_diff_of_timestamps = 1/(args.framerate-(args.framerate*0.01))
+        timestamp_diff = df.frame_timestamp - df.frame_timestamp.shift(1)
+        if timestamp_diff.max() > max_diff_of_timestamps:
+            print '[WARNING] we have %s datapoints with a timestamp different of more than %s!' %(len(timestamp_diff[timestamp_diff > max_diff_of_timestamps]), max_diff_of_timestamps)
+
+
+        #  generate plotter
+        plot = Plotter('well_%s' %csv_attr['well'], plots_folder)
+
+
+        df = df.query('type == "UFVIEW_contour"')
+        print '[INFO] loaded ',csv_attr['path']
+        print '[INFO] we have %s frames' %len(df)
+
+        #  remove unwanted cols
+        for col_to_del in remove_clos:
+            try:
+                del df[col_to_del]
+            except:
+                print 'print could not del col:', col_to_del
+
+        bin_width = args.framerate * (args.downsample)
+        # calculate bins simple
+        # df_bins = np.repeat(np.arange(((df.frame_number.max()-df.frame_number.min()+1)/bin_width)+1), bin_width)[:(df.frame_number.max()-df.frame_number.min()+1)]
+
+        # calculate bins as if we started at frame 0
+        # if we dont have the same starting frame in all wells this shold ensure a synchrone start of the bins
+        common_base_for_bin_width = int(df.frame_number.min() / int(bin_width)) * int(bin_width)
+        raw_bins = np.repeat(np.arange(((df.frame_number.max() - common_base_for_bin_width + 1) / bin_width) + 1),
+                             bin_width)
+        df_bins = raw_bins[(df.frame_number.min()-common_base_for_bin_width):(df.frame_number.max()-common_base_for_bin_width+1)]
+        # reindex for missing values based on the timestamp
+        # df['ts'] = pd.to_datetime(df.frame_timestamp, unit='s')
+        # df = df.set_index(df.ts)
+
+        print '[INFO] reindexing'
+        # reindex from framenumber
+        df = df.set_index(df.frame_number)
+        df = df.reindex(range(df.frame_number.min(),df.frame_number.max()+1))  # +1 for converting max framenumber to count
+        df['frame_number'] = df.index
+
+        print '[INFO] interpolating'
+        # interpolate the missing timestamps
+        df['frame_timestamp'] = df.frame_timestamp.interpolate()
+
+        print '[INFO] calculate distance'
+        #  calculate distancees
+        df['dist'] = dist_of_cols(df, 'contour_x', 'contour_y')
+
+        #  if rolling mean
+        if args.rolling_mean is not None:
+            print '[INFO] calculate rolling means'
+            df['dist_rm'] = pd.rolling_mean(df['dist'], args.rolling_mean, center=True)
+            df['contour_xrm'] = pd.rolling_mean(df['contour_x'], args.rolling_mean, center=True)
+            df['contour_yrm'] = pd.rolling_mean(df['contour_y'], args.rolling_mean, center=True)
+            df['dist_xrm_yrm'] = dist_of_cols(df, 'contour_xrm', 'contour_yrm')
+            df['dist_xrm_yrm_rm'] = pd.rolling_mean(df['dist_xrm_yrm'], args.rolling_mean, center=True)
+
+        if args.downsample:
+            print '[INFO] downsampling'
+            df['df_bins'] = df_bins
+            if args.downsample_methode == 'mean':
+                df_short = df.groupby(['df_bins']).mean()
+            elif args.downsample_methode == 'median':
+                df_short = df.groupby(['df_bins']).median()
+            elif args.downsample_methode == 'sum':
+                df_short = df.groupby(['df_bins']).sum()
+            elif args.downsample_methode == 'min':
+                df_short = df.groupby(['df_bins']).min()
+            elif args.downsample_methode == 'max':
+                df_short = df.groupby(['df_bins']).max()
+            else:
+                raise KeyError, 'ERROR: please choose a valid downsample method'
+
+            # fixes
+            df_short['count_valid'] = df.groupby(['df_bins'])['contour_x'].count()
+            df_short['frame_number'] = df.groupby(['df_bins'])['frame_number'].median()
+            df_short['frame_timestamp'] = df.groupby(['df_bins'])['frame_timestamp'].median()
+        else:
+            df_short = df
+
+        #  normalize
+        for col in ['dist_rm', 'dist_xrm_yrm', 'dist_xrm_yrm_rm']:
+            print '[INFO] normalizing'
+            normalize_col(df_short, col)
+
+        # binarize
+        if args.dist_threshold:
+            df_short['dist_rm_th'] = df_short['dist_rm'] >= args.dist_threshold
+            plot.plot_ts(df_short,'dist_rm_th')
+
+        #plot.plot_1D_hist(df_short, 'dist_rm', range=(0,5))
+        if args.plots == 0:
+            print '[INFO] plotting'
+            plot.plot_ts(df_short,'dist_rm')
+        if args.plots == 1:
+            print '[INFO] plotting'
+            plot.plot_ts(df_short, 'dist_rm')
+            plot.plot_ts(df_short,'dist_rm_norm')
+            plot.plot_ts(df_short,'dist_xrm_yrm')
+            plot.plot_ts(df_short,'dist_xrm_yrm_norm')
+            plot.plot_ts(df_short,'dist_xrm_yrm_rm')
+            plot.plot_ts(df_short,'dist_xrm_yrm_rm_norm')
+        if args.plots == 2:
+            pass
+
+        print '[INFO] saving'
+        print os.path.join(plots_folder, 'well_%s.csv' %csv_attr['well'])
+        df_short.to_csv(os.path.join(plots_folder,'well_%s.csv' %csv_attr['well'] ))
+    print 'done'

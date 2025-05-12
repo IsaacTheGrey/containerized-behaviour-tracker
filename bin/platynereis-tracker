@@ -1,0 +1,210 @@
+#!/usr/bin/python
+import os
+import time
+import numpy as np
+
+from loopb import __version__ as lb_version
+from loopb.bview import BView, PluginChain, get_capture_object, get_argument_parser, util
+from loopb.bview.factory import get_plugin_class_name
+from loopb.bview.plugins.transform import ExtractROIPluginCirc
+from loopb.bview.plugins.display import DisplayPlugin
+from loopb.bview.plugins.objextract import ForegroundExtractorThresh
+from loopb.bview.plugins.contour import ContourFinder
+from loopb.bview.plugins.record import VideoRecorder
+from loopb.bview.plugins.auto import AutoPlugin
+from loopb.bview.store.files import CSVFrameStore
+from loopb.filter import MophologyFilter
+
+# config
+HOME_DIR = os.path.expanduser('~/')
+DATA_BASE_DIR = os.path.join(HOME_DIR, 'data')
+
+
+def get_chain(name, roi_x=None, roi_y=None, r=None, display=True):
+    plugs = [ForegroundExtractorThresh(thresh_min=12, thresh_max=244),
+             AutoPlugin(MophologyFilter(morph_op=MophologyFilter.MORPH_OPEN, kernel=3, iterations=1)),
+             AutoPlugin(MophologyFilter(morph_op=MophologyFilter.MORPH_CLOSE, kernel=1, iterations=1)),
+             ContourFinder(maximum_n=1, minimum_size=60),
+             # Skeleton(Skeleton.METHOD_ZHANG_AND_SUEN),
+             # KalmanTracker2DSingleObject(dt=1, est_process_noise=10, est_measurement_noise=60),
+             ]
+
+    if roi_x is not None:
+        plugs.insert(0, ExtractROIPluginCirc(roi_x=roi_x, roi_y=roi_y, r=r, copy_data=True))
+
+    if display:
+        plugs.append(DisplayPlugin(name))
+
+    chain = PluginChain(*plugs, name=name)
+
+    #  set debug mode for all plugins
+    # chain.set_plugin_debug(plugin_debug)
+
+    return chain
+
+
+def main(cap_fallback=None):
+    import yaml
+    import logging
+    import sys
+
+    logging.basicConfig(level=logging.INFO)
+
+    parser = get_argument_parser('config', 'hide', 'print-fps', 'verbose', 'debug')
+    parser.add_argument('--user', type=str, help='eg. Juliane, for data storing reasons')
+
+    parser.add_argument('--configure', action='store_true', default=False,
+                        help='start configuring the tracking')
+    parser.add_argument('--only-edit-well', type=int, help='well you want to edit, recommended if lots of wells')
+    parser.add_argument('--analyse', action='store_true', default=False,
+                        help='start analysis')
+    parser.add_argument('--columns', type=int, help='number of columns ow wels')
+    parser.add_argument('--rows', type=int, help='number of rows ow wells')
+    parser.add_argument('--settings', type=str,
+                        help="name of the settings file [abc.yaml] that is saved at the end of the session, "
+                             "or if 'S' is pushed. If it is not existing it will be created")
+    args = parser.parse_args()
+
+    if args.capture == '':
+        parser.error('capture file needed')
+    if not os.path.exists(args.capture):
+        parser.error('capture file not found: %s' % args.capture)
+    if args.user is None:
+        parser.error('please specify a user')
+    if args.settings is None:
+        parser.error('please specify a settings filename.')
+    if args.configure == args.analyse:
+        parser.error(' --configure OR --analyse is needed')
+
+    # Set up dir structure
+    if os.path.basename(args.capture) == 'metadata.yaml':
+        video_base = args.capture.split('/')[-2]
+    else:
+        video_base = os.path.basename(args.capture)
+    DATA_DIR = os.path.join(DATA_BASE_DIR, args.user, video_base)
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+
+    # set terminal name
+    sys.stdout.write("\x1b]2;Platynereis-tracker: %s -- %s\x07" % (args.user, video_base))
+
+    config_file_path = os.path.join(DATA_DIR, args.settings)
+
+    if args.configure:
+        args.config = config_file_path
+        args.debug = True
+        args.seek = True
+        args.save_config = config_file_path
+        args.print_fps = False
+
+        if (args.columns is not None) or (args.rows is not None):
+            # exit immediately when generating a sample config
+            args.hide = True
+        else:
+            args.hide = False
+
+        dest_path = None
+        dest_video = None
+        flush_interval = None
+    else:
+        # analysis
+        args.config = config_file_path
+        args.print_fps = True
+        args.hide = True
+        DATA_DIR_TRACKING = os.path.join(DATA_DIR, time.strftime('%Y%m%d_%H%M%S'))
+
+        dest_path = DATA_DIR_TRACKING
+        dest_video = DATA_DIR_TRACKING
+        flush_interval = 1000
+
+    #
+    #  Checking sanity of commands only allow
+    #  -- existing config file OR --rows and --columns
+    if not os.path.exists(args.config):
+        if (args.columns is None) and (args.rows is None):
+            parser.error('if no config file exist you must specify --rows and --columns')
+
+    if os.path.exists(args.config) and ((args.columns is not None) or (args.rows is not None)):
+        parser.error('config file %s already exists, --rows and --columns can only be '
+                     'set if the config file does not exist ' % args.config)
+
+    if (args.columns is not None) or (args.rows is not None):
+        args.debug = False
+
+    # Set which chains to display
+    if args.configure & (args.only_edit_well is not None):
+        config = util.parse_config_file(args.config)
+        # print config
+
+        show_chain = args.only_edit_well
+        for i, chain in enumerate(config['plugins']):
+            assert len(chain) == 1, 'got more than one chain'
+
+            set_debug_vis_to = False
+
+            # Allow only one chain to be displayed
+            # if int((chain.keys()[0].split(':'))[0]) == show_chain:
+            if int(chain[chain.keys()[0]]['uid']) == show_chain:
+                set_debug_vis_to = True
+
+            for plugin in chain[chain.keys()[0]]['plugins']:
+                assert len(plugin) == 1, 'got more than one plugin'
+                plugin_name = plugin.keys()[0]
+                cls_name = get_plugin_class_name(plugin_name, plugin[plugin_name])
+                if cls_name in {'ExtractROIPluginCirc', 'ForegroundExtractorThresh'}:
+                    plugin[plugin_name]['debug'] = set_debug_vis_to
+                    plugin[plugin_name]['visible'] = set_debug_vis_to
+                else:
+                    plugin[plugin_name]['debug'] = False
+                    plugin[plugin_name]['debug'] = False
+
+        with open(args.config, 'w') as fn:
+            yaml.safe_dump(config, fn)
+
+    # Init Bview
+    bview = BView.new_from_commandline_args(args, cap_fallback=cap_fallback, add_display_plugin=True)
+
+    # we generate dummy roi
+    if not os.path.exists(args.config):
+        roi_cols = args.columns
+        roi_rows = args.rows
+        width = bview.capture.frame_width
+        height = bview.capture.frame_height
+        rois = [[int(x), int(y)] for y in np.linspace(0, height, roi_rows + 2)[1:-1] for x in
+                np.linspace(0, width, roi_cols + 2)[1:-1]]
+    else:
+        with open(args.config) as f:
+            dat = yaml.load(f)
+            # these roi's get anyway overwritten when the config is loaded
+            rois = [[100, 100] for _ in range(len(dat['plugins']))]
+
+    for i, roi in enumerate(rois):
+        chain = get_chain('chain %d' % i, roi_x=roi[0], roi_y=roi[1], r=100, display=False)
+        bview.attach_parallel_plugin(chain, threaded=False)
+
+    if dest_path:
+        bview.attach_framestore(CSVFrameStore(dest=dest_path, flush=flush_interval))
+
+    if dest_video:
+        display_plugin = VideoRecorder(save_directory=dest_video, show_statusbar=True, every=15,
+                                       start_recording=True, codec="libx264-crf23-mf")
+        bview.attach_display_plugin(display_plugin)
+
+    if args.configure and ((args.columns is not None) or (args.rows is not None)):
+        # init the plugins, save a config file and exit
+        bview.run_once()
+        bview.save_configuration()
+    else:
+        bview.capture.enable_async()
+        bview.main()
+
+
+if __name__ == "__main__":
+    from loopbio import CloudClient
+    c = CloudClient.new_for_application(
+        'https://c366abfc0fd94a189974a744939401af:9c08b6cf23684217af898638b8685cef@sentry.io/116222',
+        app_name='platynereis-tracker', app_version=lb_version, phone_home=True)
+    c.enable_logging()
+
+    main(cap_fallback=get_capture_object("synth:class=dot:bg=graffiti.png"))
+

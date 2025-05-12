@@ -1,0 +1,477 @@
+#!/usr/bin/python
+
+import math
+import time
+import datetime
+import string
+import threading
+import urlparse
+import json
+import BaseHTTPServer
+import os.path
+
+from loopbio.system import SystemInfo
+from loopbio.util import ConditionalEvent, TimedTrue
+
+from Phidgets.Devices.TextLCD import TextLCD
+from Phidgets.Devices.InterfaceKit import InterfaceKit
+
+HTML = r"""
+<html><head><style>
+body {
+  background: #d5d5d5;
+  font-family: 'lato', sans-serif; line-height:1.2; vertical-align:middle;
+  border-radius : 0.25rem;
+  display       : block;
+  overflow      : hidden;
+  padding       : 2em 0 0;
+  position      : relative;
+  text-align    : center;
+}
+
+.card {
+  background    : white;
+  border-radius : 3px;
+  box-shadow    : 0 1px 2px #aaa;
+  display       : inline-block;
+  padding       : 1.5rem;
+  text-align    : left;
+  font-size     : 4em;
+}
+</style></head><body>
+<div class="card">
+<pre>%s</pre>
+</div>
+</body>
+</html>
+"""
+
+
+class LCDHTTPServer(BaseHTTPServer.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, server_address, lcd, html=True):
+        BaseHTTPServer.HTTPServer.__init__(self, server_address, _LCDRequestHandler)
+        self.lcd = lcd
+        self.html = html
+
+    def quit(self):
+        threading.Thread(target=self.shutdown).start()
+
+
+# noinspection PyPep8Naming
+class _LCDRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+    def log_message(self, _format, *args):
+        pass
+
+    def log_error(self, _format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == '/sensors.json':
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            json.dump(self.server.lcd.sensor_data, self.wfile)
+        else:
+            self.send_response(200)
+            self.send_header("Content-type", "text/html" if self.server.html else "text/plain")
+            self.end_headers()
+            if self.server.html:
+                tmpl = HTML
+                txt = self.server.lcd.screen_text.replace(' ', '&nbsp;').replace(LCD.DEGREE_CHAR, '&deg;')
+            else:
+                tmpl = "%s"
+                txt = self.server.lcd.screen_text
+            self.wfile.write(tmpl % txt)
+
+    def do_POST(self):
+        # Extract and print the contents of the POST
+        length = int(self.headers['Content-Length'])
+        post_data = urlparse.parse_qs(self.rfile.read(length).decode('utf-8'))
+
+        for line in range(self.server.lcd.nrows):
+            try:
+                self.server.lcd.set_text(line, post_data['line%d' % line][0])
+            except KeyError:
+                pass
+        if 'quit' in post_data:
+            self.server.quit()
+            self.send_error(500)
+
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+
+
+def add_fish_animation(lcd):
+    # http://www.phidgets.com/documentation/customchar.html
+    # http://www.phidgets.com/docs/LCD_Character_Display_Primer
+    lcd.setCustomCharacter(0, 1045956, 10382)
+    lcd.setCustomCharacter(1, 491438, 131396)
+    lcd.setCustomCharacter(2, 146429, 462858)
+    lcd.setCustomCharacter(3, 332255, 964736)
+    lcd.setCustomCharacter(4, 10382, 1045956)
+    lcd.setCustomCharacter(5, 131396, 491438)
+    lcd.setCustomCharacter(6, 462858, 146429)
+    lcd.setCustomCharacter(7, 964736, 332255)
+
+
+class _FakeLCD(object):
+
+    def setDisplayString(*args): pass
+    def setBrightness(*args): pass
+    def setBacklight(*args): pass
+    def setContrast(*args): pass
+    def getRowCount(*args): return 2
+    def getColumnCount(*args): return 20
+    def closePhidget(*args): pass
+    def setCustomCharacter(*args): pass
+
+
+class _FakeIKT(object):
+
+    def closePhidget(*args): pass
+    def getSensorValue(*args): return 1.0
+
+
+class Sensor(object):
+    PARTS = {1124: ('temperature', 'C'),
+             1143: ('light', 'lux'),
+             1142: ('light', 'lux'),
+             1127: ('light', 'lux'),
+             }
+
+    def __init__(self, name, channel, sensor_sn, **kwargs):
+        if sensor_sn not in Sensor.PARTS:
+            raise ValueError('dont know how to read %s parts' % sensor_sn)
+
+        if sensor_sn == 1142:
+            if 'm' not in kwargs:
+                kwargs['m'] = 1.478777
+            if 'b' not in kwargs:
+                kwargs['b'] = 33.67076
+        if sensor_sn == 1143:
+            if 'm' not in kwargs:
+                kwargs['m'] = 0.02385
+            if 'b' not in kwargs:
+                kwargs['b'] = -0.56905
+
+        self.name = name
+        self._channel = channel
+        self._sensor_sn = sensor_sn
+        self._conf = kwargs
+
+    def read(self, dev):
+        val = dev.getSensorValue(self._channel)
+        if self._sensor_sn == 1124:
+            return (val * 0.2222) - 61.111
+        elif self._sensor_sn == 1143:
+            return math.exp(self._conf['m'] * val + self._conf['b'])
+        elif self._sensor_sn == 1142:
+            return self._conf['m'] * val + self._conf['b']
+        elif self._sensor_sn == 1127:
+            return val
+        return val
+
+
+class ScreensaverRenderer(object):
+
+    SCREENSAVER_KIND_IP = 'ip'
+    SCREENSAVER_KIND_TIME = 'time'
+
+    def __init__(self, row0, row1, name):
+
+        self._row0 = row0
+        self._row1 = row1
+        self._ncols = None
+        self._vars = {'_name_': name,
+                      '_ip_': '',
+                      '_time_': '',
+                      '_deg_': LCD.DEGREE_CHAR,
+                      '_left_': '|L|',
+                      '_right_': '|R|',
+                      '_center_': '|C|'}
+
+    @property
+    def name(self):
+        return self._vars['_name_']
+
+    @classmethod
+    def new_for_ip(cls, name):
+        return cls(row0='{_center_}{_name_}', row1='{_center_}IP: {_ip_}', name=name)
+
+    @classmethod
+    def new_for_time(cls, name):
+        return cls(row0='{_center_}{_name_}', row1='{_center_}{_time_}', name=name)
+
+    def initialize(self, ncols):
+        self._ncols = ncols
+
+    def add_variable(self, **variables):
+        self._vars.update(variables)
+
+    def render(self):
+        def _layout(_txt):
+            if '|L|' in _txt:
+                return string.ljust(_txt.replace('|L|', ''), self._ncols)
+            elif '|R|' in _txt:
+                return string.rjust(_txt.replace('|R|', ''), self._ncols)
+            elif '|C|' in _txt:
+                return string.center(_txt.replace('|C|', ''), self._ncols)
+            else:
+                return _txt
+
+        if self._ncols is None:
+            return
+
+        try:
+            row0 = _layout(self._row0.format(**self._vars))
+        except KeyError as e:
+            row0 = "unknown '%s'" % e.message
+
+        try:
+            row1 = _layout(self._row1.format(**self._vars))
+        except KeyError as e:
+            row1 = "unknown '%s'" % e.message
+
+        return row0, row1
+
+
+class LCD(object):
+
+    DEGREE_CHAR = '\xDF'
+
+    def __init__(self, screensaver, screensaver_timeout=10, poll_hz=2, lcd_hz=1, sensors=None, backlight_button=None,
+                 backlight_timeout=5, fake=False):
+
+        self._init_lcd_finished = threading.Event()
+        self._init_ikt_finished = threading.Event()
+        self._init_finished = ConditionalEvent((self._init_ikt_finished, self._init_lcd_finished), 'and')
+
+        self._fake = fake
+
+        self._screensaver = screensaver
+        self._screensaver_timeout = screensaver_timeout
+
+        self._update_ikt = TimedTrue(poll_hz)
+        self._update_lcd = TimedTrue(lcd_hz)
+
+        self._sensors = sensors or tuple()
+        self._sensor_data = {}
+
+        self._button = backlight_button
+        self._button_timeout = backlight_timeout
+
+        self._display_updated = datetime.datetime.now()
+
+        self._backlight_ontime = None
+        self._backlight_brightness = 0
+
+        self._serv = self._sth = None
+        self._buf = [[], []]
+        self._lock = threading.Lock()
+
+        self.nrows = self.ncols = 0
+
+        self._lcd = TextLCD()
+        self._lcd.setOnAttachHandler(self._on_attach)
+        self._lcd.openPhidget()
+
+        self._ikt = InterfaceKit()
+        self._ikt.openPhidget()
+        self._ikt.setOnAttachHandler(self._on_ikt_attach)
+
+        if not self._init_finished.wait(6.0):
+            self._lcd = _FakeLCD()
+            self._on_attach(self._lcd)
+            print "LCD Not connected"
+            self._ikt = _FakeIKT()
+
+        t = threading.Thread(target=self._update)
+        t.daemon = True
+        t.start()
+
+    def _update(self):
+        ip = SystemInfo.get_default_public_ip_address()
+        self._screensaver.add_variable(_ip_=ip)
+
+        while 1:
+
+            if(datetime.datetime.now() - self._display_updated).total_seconds() > self._screensaver_timeout:
+                if self._update_lcd:
+                    self._screensaver.add_variable(time=datetime.datetime.now().strftime("%X"))
+                    self._screensaver.add_variable(**self.sensor_data)
+
+                    row0, row1 = self._screensaver.render()
+                    with self._lock:
+                        row = 0
+                        self._buf[row][:] = row0
+                        self._lcd.setDisplayString(row, row0)
+
+                        row = 1
+                        self._buf[row][:] = row1
+                        self._lcd.setDisplayString(row, row1)
+
+            if self._update_ikt:
+                with self._lock:
+                    for s in self._sensors:
+                        self._sensor_data[s.name] = s.read(self._ikt)
+
+            if self._backlight_ontime is not None:
+                if (datetime.datetime.now() - self._backlight_ontime).total_seconds() > self._button_timeout:
+                    with self._lock:
+                        self._fade_out()
+                        self._backlight_ontime = None
+
+            time.sleep(0.1)
+
+    def _fade_out(self, finished_cb=None):
+        threading.Timer(0.08, self._fade, args=(self._backlight_brightness, 'out', finished_cb)).start()
+
+    def _fade_in(self, finished_cb=None):
+        self._lcd.setBacklight(True)
+        threading.Timer(0.08, self._fade, args=(self._backlight_brightness, 'in', finished_cb)).start()
+
+    def _fade(self, val, what, cb):
+        finished = False
+
+        if what == 'in':
+            if val <= 200:
+                self._backlight_brightness = val
+                self._lcd.setBrightness(val)
+                threading.Timer(0.08, self._fade, args=(val + 10, 'in', cb)).start()
+            else:
+                finished = True
+        elif what == 'out':
+            if val > 0:
+                self._backlight_brightness = val
+                self._lcd.setBrightness(val)
+                threading.Timer(0.08, self._fade, args=(val - 10, 'out', cb)).start()
+            else:
+                self._lcd.setBacklight(False)
+                finished = True
+
+        if finished and (cb is not None):
+            cb()
+
+    def _on_input_changed(self, evt):
+        if self._button is not None:
+            if (evt.index == self._button) and evt.state:
+                self._fade_in()
+                self._backlight_ontime = datetime.datetime.now()
+
+    def _on_ikt_attach(self, _):
+        self._ikt.setOnInputChangeHandler(self._on_input_changed)
+        self._init_ikt_finished.set()
+
+    def _on_attach(self, _):
+        self.pre_init()
+
+    @property
+    def screen_text(self):
+        return '\n'.join(''.join(line) for line in self._buf)
+
+    @property
+    def sensor_data(self):
+        return self._sensor_data
+
+    def pre_init(self):
+        add_fish_animation(self._lcd)
+        self._lcd.setContrast(110)
+
+        self.nrows = self._lcd.getRowCount()
+        self.ncols = self._lcd.getColumnCount()
+        self._screensaver.initialize(self.ncols)
+
+        self.set_text(0, self._screensaver.name, align='C')
+        self.set_text(1, "")
+
+        self._lcd.setBrightness(0)
+        self._lcd.setBacklight(True)
+        self._fade_in(finished_cb=self.post_init)
+
+    def post_init(self):
+        self._init_lcd_finished.set()
+        if self._button is not None:
+            self._fade_out()
+
+    def run_forever(self):
+        if not self._init_finished.wait(10):
+            if not self._fake:
+                raise Exception("Not connected")
+
+        self._serv = LCDHTTPServer(("0.0.0.0", 7000), self)
+
+        try:
+            print "Running"
+            self._serv.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self._lcd.setBacklight(False)
+            self._lcd.setDisplayString(0, '')
+            self._lcd.setDisplayString(1, '')
+            self._lcd.closePhidget()
+
+    def set_text(self, row, text, align=None):
+        if align == 'R':
+            text = string.rjust(text, self.ncols)
+        elif align == 'C':
+            text = string.center(text, self.ncols)
+        else:
+            # left justify by default
+            text = string.ljust(text, self.ncols)
+        with self._lock:
+            self._buf[row][:] = text
+            self._lcd.setDisplayString(row, text)
+            self._display_updated = datetime.datetime.now()
+
+
+if __name__ == "__main__":
+    import sys
+    import yaml
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--config', metavar='FILE.yaml',
+                        help='path to config file')
+    parser.add_argument('-d', '--default-config', action='store_true',
+                        help='show an example config file')
+    parser.add_argument('--fake', action='store_true',
+                        help='run even if a lcd is not connected')
+
+    args = parser.parse_args()
+    if args.default_config:
+        c = {'sensors': [{'name': 'light', 'channel': 4, 'sensor_sn': 1142, 'm': 1.8639, 'b': 41.34},
+                         {'name': 'temp', 'channel': 5, 'sensor_sn': 1124}],
+             'name': 'loopbio',
+             'screensaver_row0': '{_left_}Temp : {temp:.1f}{_deg_}C',
+             'screensaver_row1': '{_left_}Light: {light:.2f}',
+             'screensaver_timeout': 5,
+             'backlight_button': 0,
+             'backlight_timeout': 10}
+        print yaml.safe_dump(c)
+        sys.exit(0)
+
+    # defaults
+    kwargs = {'sensors': None,
+              'backlight_button': None,
+              'screensaver_timeout': 10,
+              'screensaver': ScreensaverRenderer.new_for_ip('loopbio'),
+              'fake': args.fake}
+
+    if args.config and (os.path.isfile(args.config)):
+        with open(args.config) as f:
+            conf = yaml.load(f)
+
+        kwargs['sensors'] = [Sensor(**_conf) for _conf in conf.pop('sensors')]
+        kwargs['screensaver'] = ScreensaverRenderer(row0=conf.pop('screensaver_row0'),
+                                                    row1=conf.pop('screensaver_row1'),
+                                                    name=conf.pop('name'))
+        kwargs.update(conf)
+
+    lcd = LCD(**kwargs)
+    lcd.run_forever()
+

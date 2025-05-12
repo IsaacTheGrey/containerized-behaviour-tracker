@@ -1,0 +1,7 @@
+#!/usr/bin/python
+
+from loopb.bview import BView
+
+if __name__ == "__main__":
+    bview = BView.new_from_commandline()
+    bview.main()

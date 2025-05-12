@@ -1,0 +1,21 @@
+#!/usr/bin/python
+
+from loopbio.server import Server
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', default='0.0.0.0',
+                        help='address to bind to (default: 0.0.0.0')
+    parser.add_argument('--port', default=80, type=int,
+                        help='host to bind to (default: 80)')
+    parser.add_argument('--title', default=None,
+                        help='title to show on page (default: hostname)')
+    args = parser.parse_args()
+
+
+    httpd = Server(server_address=(args.host, args.port), page_title=args.title)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass

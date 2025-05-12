@@ -1,0 +1,75 @@
+#!/usr/bin/python
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from loopb.contour import Contour
+
+from loopb.datastore import AnnotationReader
+
+
+def plot_pixel_histograms(rec, ax=None):
+    if ax is None:
+        ax = plt.figure().add_subplot(1,1,1)
+
+    fg_pixels = rec.get_pixels('foreground','contour')
+    if fg_pixels:
+        fg = np.hstack(fg_pixels)
+        ax.hist(fg,bins=51,range=(0,255),normed=True,label='fg')
+    bg_pixels = rec.get_pixels('background','roi')
+    if bg_pixels:
+        bg = np.hstack(bg_pixels)
+        ax.hist(bg,bins=51,range=(0,255),normed=True,label='bg')
+    ax.set_xlim(0,255)
+    ax.legend()
+
+    return ax
+
+
+def plot_contour_properties(rec, axs=None):
+    if axs is None:
+        axa = plt.figure().add_subplot(1,1,1)
+        axb = axa.twinx()
+    else:
+        axa,axb = axs
+
+    contours = rec.get_contours('foreground')
+    areas = []
+    longdims = []
+    if len(contours):
+        for c in contours:
+            contour = Contour(c, None)
+            areas.append(contour.area)
+            longdims.append(contour.longest_dimension)
+
+    axa.set_xlabel('')
+    axa.set_xticklabels([])
+    axa.set_xlim(-1,len(areas)+1)
+
+    axa.plot(range(len(areas)),areas,'ro')
+    axa.set_ylabel('contour area (px)', color='r')
+    for tl in axa.get_yticklabels():
+        tl.set_color('r')
+
+    axb.plot(range(len(longdims)),longdims,'bo')
+    axb.set_ylabel('contour longest dimenstion (px)', color='b')
+    for tl in axb.get_yticklabels():
+        tl.set_color('b')
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('zip', default='', nargs='?', type=str,
+                        help='path to annotaion zip file')
+    args = parser.parse_args()
+
+    rec = AnnotationReader(args.zip)
+
+    plot_pixel_histograms(rec)
+    plot_contour_properties(rec)
+
+    rec.close()
+
+    plt.show()

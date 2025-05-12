@@ -1,0 +1,44 @@
+#!/bin/bash
+
+usage() { echo "Usage: $0 -n NAME -v VERSION" 1>&2; exit 1; }
+
+while getopts ":n:v:" o; do
+    case "${o}" in
+        n)
+            NAME=${OPTARG}
+            ;;
+        v)
+            VERSION=${OPTARG}
+            ;;
+        \?)
+         usage
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ -z "${NAME}" ]; then
+    usage
+fi
+
+if [ -z "${VERSION}" ]; then
+    usage
+fi
+
+HOST=`hostname`
+HOST_MSG="host:${HOSTNAME}"
+
+if [ -r /var/lib/dbus/machine-id ]; then
+  MACHINE_UID=`cat /var/lib/dbus/machine-id`
+  MACHINE_MSG="uid:${MACHINE_UID}"
+else
+  MACHINE_MSG="uid:?"
+fi
+
+V_MSG="v:${VERSION}"
+
+curl -s -X POST --data-urlencode "payload={\"channel\": \"#ping\", \"username\": \"ping\", \"text\": \"${NAME} ${V_MSG} ${HOST_MSG} ${MACHINE_MSG}\"}" https://hooks.slack.com/services/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
+

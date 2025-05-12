@@ -1,0 +1,38 @@
+#!/usr/bin/python
+import os.path
+
+from loopb.bview import BView, get_argument_parser
+from loopb.bview.capture.synth import MovingMouseCapture
+from loopb.bview.plugins.annotation import AnnotationObjectPositionPlugin
+from loopb.bview.store.files import ExcelFrameStore, VOTGroundTruthFrameStore
+
+
+def main(cap_fallback=None):
+    parser = get_argument_parser()
+    parser.add_argument('--dest', type=str, required=True,
+                        help='destination file for marked object positions')
+    parser.add_argument('--every', type=int, default=1,
+                        help='annotate every nth frame')
+    parser.add_argument('--what', choices=(AnnotationObjectPositionPlugin.BOUNDING_BOX, AnnotationObjectPositionPlugin.CENTRE_OF_MASS),
+                        help='what to annotate', required=True)
+    args = parser.parse_args()
+
+    if args.what == AnnotationObjectPositionPlugin.CENTRE_OF_MASS:
+        if os.path.splitext(args.dest)[1] != '.xls':
+            parser.error('destination must end in .xls')
+    elif args.what == AnnotationObjectPositionPlugin.BOUNDING_BOX:
+        if os.path.basename(args.dest) != 'groundtruth.txt':
+            parser.error('destination filename must be groundtruth.txt')
+
+    bview = BView.new_from_commandline_args(args, cap_fallback=cap_fallback, add_display_plugin=False)
+    bview.attach_plugin(AnnotationObjectPositionPlugin(what=args.what,
+                                                       every=args.every))
+    if args.what == AnnotationObjectPositionPlugin.CENTRE_OF_MASS:
+        bview.attach_framestore(ExcelFrameStore(args.dest))
+    elif args.what == AnnotationObjectPositionPlugin.BOUNDING_BOX:
+        bview.attach_framestore(VOTGroundTruthFrameStore(args.dest))
+
+    bview.main()
+
+if __name__ == "__main__":
+    main(cap_fallback=MovingMouseCapture('fps=100:bg=graffiti.png'))

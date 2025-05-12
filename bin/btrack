@@ -1,0 +1,45 @@
+#!/usr/bin/python
+import logging
+
+from loopb.bview import BView
+from loopb.bview.factory import app_factory
+from loopb.bview.capture import get_capture_object
+from loopb.bview.util import BViewArgumentParser, parse_config_file, setup_argument_parser
+
+if __name__ == "__main__":
+    parser = BViewArgumentParser()
+    parser.add_argument('setup', nargs=1,
+                        help='yaml file describing the computation chain')
+    setup_argument_parser(parser, 'hide', 'default', 'seek', 'verbose', 'debug',
+                          'step', 'stop-frame', 'save-config', 'print-fps')
+    args = parser.parse_args()
+
+    # set up logging
+    logging.basicConfig(level=logging.DEBUG if args.verbose > 0 else logging.INFO,
+                        format='%(name)-35s %(levelname)-8s %(message)s')
+
+    fn = args.setup[0]
+    conf = parse_config_file(fn)
+    if not conf:
+        parser.error('could not find %s' % fn)
+
+    desc = args.capture or conf.get('capture', {}).get('desc')
+    cap = get_capture_object(desc,
+                             capture_options=conf.get('capture'),
+                             transform_options=conf.get('transform'))
+
+    app = BView(cap,
+                visible=not args.hide,
+                debug=args.debug,
+                single_frame_step=args.step,
+                stop_frame=args.stop_frame,
+                config=conf,
+                save_config=args.save_config,
+                verbosity=args.verbose)
+
+    app_factory(app, conf)
+
+    if args.print_fps:
+        app.attach_progress()
+
+    app.main()

@@ -1,0 +1,72 @@
+#!/usr/bin/python
+
+from loopb.bview import BView, BlockingPlugin, PluginFinished, get_capture_object,\
+    parse_config_file, get_argument_parser
+
+from loopb.gui import AnnotateImage
+from loopb.datastore import AnnotationWriter
+
+
+class AnnotationFGBGPlugin(BlockingPlugin):
+
+    def __init__(self, dest, nframes):
+        super(AnnotationFGBGPlugin, self).__init__(every=1)
+        self._a = None
+        self._dest = dest
+        self._nframes = nframes
+        self._annotate_args = dict(layers=('foreground', 'background'),
+                                   modes=(AnnotateImage.BRUSH, AnnotateImage.RECTANGLE),
+                                   fill_mask=True,
+                                   mask_radius=2)
+        if not dest.endswith('.zip'):
+            raise ValueError('dest should be a zip file')
+        self.uses_color = True
+
+        self._rec = AnnotationWriter()
+
+    def process_frame(self, frame, frame_number, frame_count, frame_timestamp, now, state):
+
+        self._rec.add_sample_frame(frame)
+        self._annotate_args['extra_cmds'] = "'s'ave, 'q'uit, 'i'gnore frame"
+
+        a = AnnotateImage('annotator', frame, **self._annotate_args)
+        while True:
+            key = a.loop_until(state['KEY'], ord('s'), ord('q'), ord('i'))
+            if key == ord('s'):
+                r = a.get_configuration()
+                self._rec.save_annotation_configuration(r, frame, frame_number, frame_count, frame_timestamp)
+                break
+            elif key == ord('i'):
+                break
+            elif key == ord('q'):
+                raise PluginFinished
+
+    def stop(self):
+        self._rec.save_as_zipfile(self._dest)
+        self.logger.info('wrote %s' % self._dest)
+
+if __name__ == "__main__":
+    parser = get_argument_parser()
+    parser.add_argument('--dest', type=str,
+                        help='yaml filename to save the annotations to')
+    parser.add_argument('--nframes', type=int, required=False, default=1,
+                        help='number of frames to collect data from')
+    args = parser.parse_args()
+
+    conf = parse_config_file(args.config)
+    cam = get_capture_object(args.capture, capture_options=conf.get('capture'))
+
+    if (cam.filename is None) and (args.dest is None):
+        dest = None
+        parser.error('--dest must be provided for non file based capture sources')
+    elif args.dest is None:
+        dest = cam.filename + '_fgbg.zip'
+    else:
+        dest = args.dest
+
+    bview = BView(cam)
+
+    plugin = AnnotationFGBGPlugin(dest, args.nframes)
+    bview.attach_plugin(plugin)
+
+    bview.main()

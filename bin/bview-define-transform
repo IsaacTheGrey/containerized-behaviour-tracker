@@ -1,0 +1,57 @@
+#!/usr/bin/python
+
+import yaml
+
+from loopb.bview import BView, BlockingPlugin, PluginFinished, get_argument_parser
+from loopb.bview.util import CONFIG_VERSION
+from loopb.gui import AnnotateImage
+
+
+class SaveTransformPlugin(BlockingPlugin):
+
+    def __init__(self, dest, frame_n):
+        super(SaveTransformPlugin, self).__init__(every=1)
+        self._a = None
+        self._dest = dest
+        self._frame_n = frame_n
+        if not dest.endswith('.yaml'):
+            raise ValueError('dest should be a yaml file')
+        self.uses_color = True
+
+    def process_frame(self, frame, frame_number, frame_count, frame_timestamp, now, state):
+        if frame_count == self._frame_n:
+            a = AnnotateImage('annotator', frame,
+                              layers=('background',),
+                              modes=(AnnotateImage.BRUSH, AnnotateImage.RECTANGLE),
+                              fill_mask=True,
+                              extra_cmds="'s'ave, 'q'uit",
+                              extra_help="rectangle crops, brush masks out")
+            a.set_mode(AnnotateImage.RECTANGLE)
+            while True:
+                key = a.loop_until(state['KEY'], ord('s'), ord('q'))
+                if key == ord('s'):
+                    break
+                elif key == ord('q'):
+                    raise PluginFinished
+            r = a.get_configuration()
+            with open(self._dest, 'w') as f:
+                yaml.safe_dump({'version':CONFIG_VERSION,
+                                'transform':r}, f)
+            a.close()
+            raise PluginFinished
+
+
+if __name__ == "__main__":
+    parser = get_argument_parser()
+    parser.add_argument('--dest', type=str, required=True,
+                        help='yaml filename to save the annotations to')
+    parser.add_argument('--frame', type=int, required=False, default=1,
+                        help='frame number from video used to define the transform')
+    args = parser.parse_args()
+
+    bview = BView.new_from_commandline_args(args, add_display_plugin=False)
+
+    plugin = SaveTransformPlugin(args.dest, args.frame)
+    bview.attach_plugin(plugin)
+
+    bview.main()
