@@ -9,5 +9,7 @@ sudo docker build -t loopb-py2 .
 
 ## Spinning up the container
 ```bash
-docker run -it --rm -v ~/loopb-data:/path/to/data -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix loopb-py2
+xhost +local:docker
+
+docker run -it --rm -v ~/loopb-data:/path/to/data:/data:Z -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix loopb-py2
 ```
